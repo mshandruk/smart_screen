@@ -1,0 +1,13 @@
+[package]
+name = "smart_screen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hidapi = "2.6.4"
+anyhow = "1.0"
+sysinfo = "0.38.0"
+nvml-wrapper = "0.11"
+ureq = "3.1.4"
+serde_json = "1.0.149"
+serde = { version = "1.0.228", features = ["derive"] }
