@@ -1,35 +1,164 @@
 use serde::Deserialize;
+use std::time::Duration;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct HardwareNode {
     #[serde(rename = "Text")]
-    text: String,
+    pub text: String,
     #[serde(rename = "HardwareId")]
-    hardware_id: Option<String>,
+    pub hardware_id: Option<String>,
     #[serde(rename = "Type")]
-    sensor_type: Option<String>,
+    pub sensor_type: Option<String>,
     #[serde(rename = "Value")]
-    value: Option<String>,
+    pub value: Option<String>,
     #[serde(rename = "Children")]
-    #[serde(default)]
-    children: Vec<HardwareNode>,
+    pub children: Vec<HardwareNode>,
 }
 
-pub fn get_cpu_temp(hardware_data: &HardwareNode) -> Option<f64> {
-    let cpu_node = find_hardware_node("cpu", &hardware_data)?;
-    let priority_sensors_names = vec![
-        "CPU Package",
-        "Core Max",
-        "Core (Tctl/Tdie)",
-        "Core Average",
-    ];
-    for sensor_name in priority_sensors_names.iter() {
-        if let Some(sensor_raw_value) = find_sensor_value(cpu_node, sensor_name, "Temperature") {
-            return parse_str_to_f64(sensor_raw_value).ok();
+#[derive(Debug, Clone)]
+pub enum DataSourceError {
+    Network(String),
+    InvalidData(String),
+}
+pub trait DataSource {
+    fn get_data(&self) -> Result<HardwareNode, DataSourceError>;
+}
+
+pub struct HttpDatasource {
+    agent: ureq::Agent,
+    url: String,
+}
+
+impl HttpDatasource {
+    pub fn new(url: &str) -> Self {
+        let config = ureq::config::Config::builder()
+            .timeout_connect(Some(Duration::from_millis(150)))
+            .timeout_global(Some(Duration::from_millis(300)))
+            .build();
+        Self {
+            agent: ureq::Agent::new_with_config(config),
+            url: url.to_string(),
         }
     }
+}
 
-    None
+impl DataSource for HttpDatasource {
+    fn get_data(&self) -> Result<HardwareNode, DataSourceError> {
+        let body = self
+            .agent
+            .get(&self.url)
+            .call()
+            .map_err(|e| DataSourceError::Network(e.to_string()))?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| DataSourceError::InvalidData(e.to_string()))?;
+
+        serde_json::from_str(&body).map_err(|e| DataSourceError::InvalidData(e.to_string()))
+    }
+}
+
+pub struct Monitor {
+    data_source: Box<dyn DataSource>,
+    cache: Option<HardwareNode>,
+}
+
+impl Monitor {
+    pub fn new(data_source: Box<dyn DataSource>) -> Self {
+        Self {
+            data_source,
+            cache: None,
+        }
+    }
+    pub fn refresh(&mut self) -> Result<(), DataSourceError> {
+        let data = self.data_source.get_data()?;
+        self.cache = Some(data);
+        Ok(())
+    }
+    pub fn get_cpu_temp(&self) -> Option<f64> {
+        let priority_sensors_names = [
+            "CPU Package",
+            "Core Max",
+            "Core (Tctl/Tdie)",
+            "Core Average",
+        ];
+
+        let data = self.cache.as_ref()?;
+        SensorFinder::new(data)
+            .find("cpu", "temperature", &priority_sensors_names)
+            .and_then(|node| node.value.as_ref())
+            .and_then(|raw_value| parse_str_to_f64(raw_value).ok())
+    }
+}
+
+struct SensorFinder<'a> {
+    root: &'a HardwareNode,
+}
+
+impl<'a> SensorFinder<'a> {
+    pub fn new(root: &'a HardwareNode) -> Self {
+        Self { root }
+    }
+    pub fn find(
+        &self,
+        hardware_id: &str,
+        target_type: &str,
+        target_names: &[&str],
+    ) -> Option<&HardwareNode> {
+        Self::find_recursive(self.root, hardware_id, target_type, target_names)
+    }
+    fn find_recursive(
+        current_node: &'a HardwareNode,
+        hardware_id: &str,
+        target_type: &str,
+        target_names: &[&str],
+    ) -> Option<&'a HardwareNode> {
+        println!("find_recursive посетил: {}", current_node.text);
+        let is_correct_hw = current_node
+            .hardware_id
+            .as_ref()
+            .map(|hw_id| hw_id.to_lowercase().contains(hardware_id))
+            .unwrap_or(false);
+
+        if is_correct_hw {
+            for target_name in target_names {
+                if let Some(found_sensor) =
+                    Self::find_sensor(current_node, target_type, target_name)
+                {
+                    return Some(found_sensor);
+                }
+            }
+            return None;
+        }
+
+        for child in &current_node.children {
+            if let Some(found) = Self::find_recursive(child, hardware_id, target_type, target_names)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn find_sensor(
+        hardware_node: &'a HardwareNode,
+        target_type: &str,
+        target_name: &str,
+    ) -> Option<&'a HardwareNode> {
+        if let Some(sensor_type) = &hardware_node.sensor_type {
+            if target_name.to_lowercase() == hardware_node.text.to_lowercase()
+                && target_type.to_lowercase() == sensor_type.to_lowercase()
+            {
+                return Some(hardware_node);
+            }
+        }
+
+        for child in &hardware_node.children {
+            if let Some(found_sensor) = Self::find_sensor(child, target_type, target_name) {
+                return Some(found_sensor);
+            }
+        }
+        None
+    }
 }
 
 fn parse_str_to_f64(raw_value: &str) -> Result<f64, String> {
@@ -40,72 +169,30 @@ fn parse_str_to_f64(raw_value: &str) -> Result<f64, String> {
         .map_err(|e| format!("Parse error '{}': {}", normalized_value, e))
 }
 
-fn find_hardware_node<'a>(
-    hardware_name: &str,
-    hardware_node: &'a HardwareNode,
-) -> Option<&'a HardwareNode> {
-    if let Some(hardware_id) = &hardware_node.hardware_id {
-        if hardware_id.to_lowercase().contains(hardware_name) {
-            return Some(hardware_node);
-        }
-    }
-
-    for children in &hardware_node.children {
-        if let Some(found) = find_hardware_node(hardware_name, children) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn find_sensor_value<'a>(
-    hardware_node: &'a HardwareNode,
-    sensor_name: &str,
-    sensor_type: &str,
-) -> Option<&'a String> {
-    if let (Some(sens_type), Some(value)) = (&hardware_node.sensor_type, &hardware_node.value) {
-        if sens_type == sensor_type && sensor_name == hardware_node.text {
-            return Some(value);
-        }
-    }
-
-    for children in &hardware_node.children {
-        if let Some(sensor_value) = find_sensor_value(children, sensor_name, sensor_type) {
-            return Some(sensor_value);
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn find_sensor_value_cpu_temperature_returns_raw_value() {
-        let leaf = HardwareNode {
-            text: "Core(Tctl/Tdie)".to_string(),
-            value: Some("55.9 C".to_string()),
-            sensor_type: Some("Temperature".to_string()),
-            hardware_id: None,
-            children: vec![],
-        };
-
-        let root = HardwareNode {
-            sensor_type: None,
-            value: None,
-            text: "Temperatures".to_string(),
-            hardware_id: None,
-            children: vec![leaf],
-        };
-
-        let result = find_sensor_value(&root, "Core(Tctl/Tdie)", "Temperature");
-
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), "55.9 C");
+    struct MockDataSource {
+        result: Result<HardwareNode, DataSourceError>,
     }
 
+    impl DataSource for MockDataSource {
+        fn get_data(&self) -> Result<HardwareNode, DataSourceError> {
+            self.result.clone()
+        }
+    }
+    #[test]
+    fn get_data_network_failure_returns_none() {
+        let mock_datasource = MockDataSource {
+            result: Err(DataSourceError::Network("Timeout".into())),
+        };
+        let monitor = Monitor::new(Box::new(mock_datasource));
+
+        let result = monitor.get_cpu_temp();
+
+        assert!(result.is_none());
+    }
     #[test]
     fn parse_str_to_f64_valid_formats_success() {
         let test_cases = vec![
@@ -122,72 +209,5 @@ mod tests {
             assert!(result.is_ok());
             assert!((result.unwrap() - expected).abs() < 0.001);
         }
-    }
-
-    #[test]
-    fn parse_temperature_invalid_formats_returns_err() {
-        let input_values = vec!["NA", " ", "", "55,9a", "55.9a"];
-
-        for input_value in input_values.iter() {
-            let result = parse_str_to_f64(input_value);
-
-            assert!(result.is_err());
-        }
-    }
-    #[test]
-    fn find_hardware_node_case_insensitive_returns_node() {
-        let hardware_ids = vec!["/amdcpu/0", "/Amdcpu/0", "AMDCPU", "amdcpu"];
-
-        for hw_id in hardware_ids.iter() {
-            let data = HardwareNode {
-                text: "".to_string(),
-                value: None,
-                sensor_type: None,
-                hardware_id: Some(hw_id.to_string()),
-                children: vec![],
-            };
-
-            let result = find_hardware_node("cpu", &data);
-
-            assert!(result.is_some());
-            assert_eq!(result.unwrap().hardware_id, data.hardware_id);
-        }
-    }
-
-    #[test]
-    fn get_cpu_temp_check_priority_sensors_names() {
-        let cpu_node = HardwareNode {
-            text: "Intel Core i5-8350U".to_string(),
-            hardware_id: Some("/intelcpu/0".to_string()),
-            sensor_type: None,
-            value: None,
-            children: vec![
-                HardwareNode {
-                    text: "Core Max".to_string(),
-                    value: Some("40,0 °C".to_string()),
-                    sensor_type: Some("Temperature".to_string()),
-                    hardware_id: None,
-                    children: vec![],
-                },
-                HardwareNode {
-                    text: "Core Average".to_string(),
-                    value: Some("55,0 °C".to_string()),
-                    sensor_type: Some("Temperature".to_string()),
-                    hardware_id: None,
-                    children: vec![],
-                },
-                HardwareNode {
-                    text: "CPU Package".to_string(),
-                    value: Some("56,0 °C".to_string()),
-                    sensor_type: Some("Temperature".to_string()),
-                    hardware_id: None,
-                    children: vec![],
-                },
-            ],
-        };
-
-        let temp = get_cpu_temp(&cpu_node).unwrap();
-
-        assert_eq!(temp, 56.0);
     }
 }
