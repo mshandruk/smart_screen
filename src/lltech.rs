@@ -1,4 +1,5 @@
-use crate::{HardwareNode, get_cpu_temp};
+use crate::Monitor;
+use crate::libhwmon::DataSource;
 use anyhow::{Context, Result};
 use hidapi::{HidApi, HidDevice};
 use sysinfo::{Components, Networks, System};
@@ -23,17 +24,20 @@ pub enum MetricId {
 
 pub struct LlTechDisplay {
     dev: HidDevice,
+    monitor: Monitor,
 }
 
 impl LlTechDisplay {
-    pub fn auto_detect() -> Result<Self> {
+    pub fn auto_detect(datasource: Box<dyn DataSource>) -> Result<Self> {
+        let monitor = Monitor::new(datasource);
         let api = HidApi::new()?;
         let dev = api
             .device_list()
             .find(|d| d.vendor_id() == VID && d.product_id() == PID)
             .context("llTech display not found")?
             .open_device(&api)?;
-        Ok(Self { dev })
+
+        Ok(Self { dev, monitor })
     }
 
     pub fn init(&self, sys: &mut System) {
@@ -53,12 +57,17 @@ impl LlTechDisplay {
         }
     }
 
-    pub fn update_metrics(&self, sys: &mut System, networks: &mut Networks) -> Result<()> {
+    pub fn update_metrics(&mut self, sys: &mut System, networks: &mut Networks) -> Result<()> {
         sys.refresh_all();
         networks.refresh(false);
 
         // 1. Temperature CPU (Priority: LHM JSON -> sysinfo)
-        let mut cpu_temp = self.get_cpu_temp_lhm_json();
+        self.monitor.refresh().ok();
+        let mut cpu_temp = self
+            .monitor
+            .get_cpu_temp()
+            .map(|t| t.round() as u8)
+            .unwrap_or(0);
 
         if cpu_temp == 0 {
             println!("cpu_temp from sysinfo");
@@ -91,30 +100,6 @@ impl LlTechDisplay {
         self.send_metrics_fixed(
             cpu_temp, cpu_load, gpu_temp, gpu_load, ram_load, net_up, net_down, volume,
         )
-    }
-
-    pub fn get_cpu_temp_lhm_json(&self) -> u8 {
-        use std::time::Duration;
-        use ureq::config::Config;
-
-        let config = Config::builder()
-            .timeout_connect(Some(Duration::from_millis(150)))
-            .timeout_global(Some(Duration::from_millis(300)))
-            .build();
-
-        let agent = ureq::Agent::new_with_config(config);
-        let body = if let Ok(mut resp) = agent.get("http://localhost:8085/data.json").call() {
-            resp.body_mut().read_to_string().unwrap_or_default()
-        } else {
-            return 0;
-        };
-
-        if body.is_empty() {
-            return 0;
-        }
-
-        let v: HardwareNode = serde_json::from_str(&body).unwrap();
-        get_cpu_temp(&v).map(|t| t.round() as u8).unwrap_or(0)
     }
 
     fn send_metrics_fixed(
