@@ -8,6 +8,7 @@ mod nvidia;
 pub struct GpuInfo {
     pub temp: u8,
     pub load: u8,
+    pub ram_used: u64,
 }
 
 static BACKEND: LazyLock<Box<dyn GpuBackend + Send + Sync>> = LazyLock::new(|| {
@@ -18,11 +19,11 @@ static BACKEND: LazyLock<Box<dyn GpuBackend + Send + Sync>> = LazyLock::new(|| {
     }
 });
 
-pub fn read_gpu_metric() -> (u8, u8) {
+pub fn read_gpu_metric() -> (u8, u8, u64) {
     BACKEND
         .read()
-        .map(|info| (info.temp, info.load))
-        .unwrap_or((0, 0))
+        .map(|info| (info.temp, info.load, info.ram_used))
+        .unwrap_or((0, 0, 0))
 }
 
 pub fn read_gpu_brand() -> String {

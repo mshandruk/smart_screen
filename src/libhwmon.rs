@@ -112,7 +112,6 @@ impl<'a> SensorFinder<'a> {
         target_type: &str,
         target_names: &[&str],
     ) -> Option<&'a HardwareNode> {
-        println!("find_recursive посетил: {}", current_node.text);
         let is_correct_hw = current_node
             .hardware_id
             .as_ref()

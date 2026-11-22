@@ -1,4 +1,4 @@
-use smart_screen::libhwmon::{DataSource, DataSourceError, HardwareNode, Monitor};
+use smart_monitor::libhwmon::{DataSource, DataSourceError, HardwareNode, Monitor};
 use std::default::Default;
 
 struct MockDataSource {

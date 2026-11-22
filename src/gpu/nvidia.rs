@@ -24,7 +24,14 @@ impl GpuBackend for NvidiaBackend {
 
         let load = device.utilization_rates().ok()?.gpu.min(255) as u8;
 
-        Some(GpuInfo { temp, load })
+        let mem_info = device.memory_info().ok()?;
+        let ram_used = mem_info.used;
+
+        Some(GpuInfo {
+            temp,
+            load,
+            ram_used,
+        })
     }
 
     fn get_brand(&self) -> String {
